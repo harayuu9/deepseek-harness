@@ -30,7 +30,8 @@ import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-
 import { workspaceDisplayTitle } from '@deepseek-ai/dsh-api-workspace-controller/default-workspace'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
-import type { WorkspaceBrowserProps } from '../contract/slots.ts'
+import type { WorkspaceBrowserProps, WorkspaceParentMap } from '../contract/slots.ts'
+import { resolveWorkspaceParents } from '../workspace-parents.ts'
 import type { ArchivedFilter, GroupNode, SessionNode, SessionOrderBy, SessionRowState } from '../tree.ts'
 import {
   deriveFlat, deriveGroups, deriveSearchResults, orderByRecency, owningGroupKey, owningParentFolder,
@@ -257,10 +258,13 @@ type SessionTreeProps = Pick<
 > & PropsRenderSlots<
   | 'sidebar.workspaces.session.menu.item'
   | 'sidebar.workspaces.session.row.action'
+  | 'sidebar.workspaces.workspace.menu.item'
   | 'sidebar.session.row.leading'
   | 'sidebar.session.row.hover'
 > & {
   shortcuts: readonly import('@deepseek-ai/dsh-client-shortcuts/client').ShortcutCatalogEntry[]
+  /** Merged logical Workspace parents; they nest in both grouped views. */
+  workspaceParents: WorkspaceParentMap
   /** Always-mounted Session list snapshot. */
   list: SessionListState
   /** Host account home for POSIX hover-path abbreviation. */
@@ -285,10 +289,6 @@ type SessionTreeProps = Pick<
   rowState: SessionRowState
   /** Switch the archived filter back to the default hide-archived view. */
   onLeaveArchivedOnly: () => void
-  /** Open the browser-owned rename dialog for a real Workspace group. */
-  onRenameRequest: (workspaceId: WorkspaceId, currentTitle: string) => void
-  /** Open the browser-owned delete-confirmation dialog for a real Workspace group. */
-  onDeleteRequest: (workspaceId: WorkspaceId, currentTitle: string) => void
   /** Open the rename dialog from a row title double-click. */
   onSessionRenameRequest: (sessionId: SessionNode['id'], currentTitle: string) => void
   /** One Session chosen from search that must be exposed and scrolled into view. */
@@ -318,10 +318,10 @@ function SessionTree({
   list, useSessionStatus, startSession, open, workspaces, ungroupedSessionIds,
   rowState, onLeaveArchivedOnly,
   workspaceReady, animationResetKey, usePanelInfo,
-  onRenameRequest, onDeleteRequest, onSessionRenameRequest,
+  onSessionRenameRequest,
   renderSlot,
   insertWorkspaceBefore,
-  nestWorkspaces, groupExpansion, setGroupExpanded,
+  nestWorkspaces, workspaceParents, groupExpansion, setGroupExpanded,
   setSessionOrder, home, t,
   revealSessionId, onSessionRevealed, shortcuts,
 }: SessionTreeProps) {
@@ -352,14 +352,19 @@ function SessionTree({
     setGroupExpanded(currentGroup, true)
   }, [current, currentGroup, setGroupExpanded, groupExpansion])
   const parents = useMemo(() => {
-    if (!nestWorkspaces) return new Map<string, WorkspaceId | undefined>()
     const keysByPath = new Map(workspaces.map(workspace => [workspace.path, workspace.workspaceId]))
     const paths = [...keysByPath.keys()]
-    return new Map<string, WorkspaceId | undefined>(workspaces.map((workspace) => {
-      const path = owningParentFolder(workspace.path, paths)
-      return [workspace.workspaceId, path === undefined ? undefined : keysByPath.get(path)]
-    }))
-  }, [nestWorkspaces, workspaces])
+    const pathById = new Map<string, string>(workspaces.map(workspace => [workspace.workspaceId, workspace.path]))
+    return resolveWorkspaceParents(
+      workspaces.map(workspace => workspace.workspaceId),
+      workspaceParents,
+      (workspaceId) => {
+        if (!nestWorkspaces) return undefined
+        const path = owningParentFolder(pathById.get(workspaceId) ?? '', paths)
+        return path === undefined ? undefined : keysByPath.get(path)
+      },
+    )
+  }, [nestWorkspaces, workspaceParents, workspaces])
   const currentAncestors = useMemo(() => {
     const keys = new Set<string>()
     for (let key = currentGroup === undefined ? undefined : parents.get(currentGroup); key !== undefined; key = parents.get(key)) {
@@ -571,18 +576,8 @@ function SessionTree({
             }
           }}
           drag={workspaceDragProps}
-          actions={group.workspaceId === undefined
-            ? undefined
-            : {
-              rename: () => {
-              /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
-                if (group.workspaceId !== undefined) onRenameRequest(group.workspaceId, group.label)
-              },
-              delete: () => {
-              /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
-                if (group.workspaceId !== undefined) onDeleteRequest(group.workspaceId, group.label)
-              },
-            }}
+          parentWorkspaceId={parents.get(group.key)}
+          renderSlot={renderSlot}
         />
         {childRows.length > 0 && (
           <div role="group">
@@ -917,6 +912,9 @@ export function WorkspaceBrowser({
   useHostInfo,
   useShortcuts,
   useWorkspaceShortcuts,
+  useWorkspaceParents,
+  useWorkspaceRowRequest,
+  settleWorkspaceRowRequest,
   requestSearch,
   requestAddWorkspace,
   closeAddWorkspace,
@@ -929,6 +927,8 @@ export function WorkspaceBrowser({
   const searchShortcut = shortcuts.find(row => row.id === 'session.search')
   const addShortcut = shortcuts.find(row => row.id === 'workspace.add')
   const shortcutState = useWorkspaceShortcuts(state => state)
+  const workspaceParents = useWorkspaceParents(parents => parents)
+  const workspaceRowRequest = useWorkspaceRowRequest(request => request)
   // Ordering remains live while the rail or search replaces the list body.
   const list = useSessions(state => state)
   const storedWorkspaces = useWorkspaces(state => state.items)
@@ -1241,6 +1241,24 @@ export function WorkspaceBrowser({
     setDeleteCommittedId(null)
     setDeleteTarget(null)
   }, [deleteCommittedId, workspaces])
+  // The Workspace row menu entries raise a request; the dialogs here answer it.
+  useEffect(() => {
+    if (workspaceRowRequest === null) return
+    settleWorkspaceRowRequest()
+    if (workspaceRowRequest.kind === 'rename') {
+      setRenameTarget({
+        workspaceId: workspaceRowRequest.workspaceId,
+        storedTitle: storedWorkspaces.find(w => w.workspaceId === workspaceRowRequest.workspaceId)?.title
+          ?? workspaceRowRequest.displayTitle,
+      })
+      setRenameDraft(workspaceRowRequest.displayTitle)
+      setRenameError(null)
+    } else {
+      setDeleteTarget({ workspaceId: workspaceRowRequest.workspaceId, title: workspaceRowRequest.displayTitle })
+      setDeleteError(null)
+    }
+  }, [workspaceRowRequest])
+
   const closeDelete = () => {
     if (deleting) return
     setDeleteTarget(null)
@@ -1462,18 +1480,7 @@ export function WorkspaceBrowser({
                 onSessionRevealed={acknowledgeSessionReveal}
                 home={home}
                 t={t}
-                onRenameRequest={(workspaceId, displayTitle) => {
-                  setRenameTarget({
-                    workspaceId,
-                    storedTitle: storedWorkspaces.find(w => w.workspaceId === workspaceId)?.title ?? displayTitle,
-                  })
-                  setRenameDraft(displayTitle)
-                  setRenameError(null)
-                }}
-                onDeleteRequest={(workspaceId, title) => {
-                  setDeleteTarget({ workspaceId, title })
-                  setDeleteError(null)
-                }}
+                workspaceParents={workspaceParents}
               />
             ))}
       </div>

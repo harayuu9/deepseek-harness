@@ -13,7 +13,11 @@ import type {
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
-import type { DirectoryFlowOwnerProps, WorkspaceBrowserProps } from '../src/client/contract/slots.ts'
+import type {
+  DirectoryFlowOwnerProps, MenuOpenState, WorkspaceBrowserProps, WorkspaceRowOwnerProps, WorkspaceRowRequest,
+} from '../src/client/contract/slots.ts'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { DeleteWorkspaceMenuItem, RenameWorkspaceMenuItem } from '../src/client/session-actions/WorkspaceRowActions.tsx'
 import { createWorkspaceShortcutControls } from '../src/client/shortcuts.ts'
 import { createWorkspaceViewStore, FLAT_SESSION_ORDER_KEY } from '../src/client/stores.ts'
 import { UNGROUPED_KEY } from '../src/client/tree.ts'
@@ -99,17 +103,46 @@ function dragData(): Pick<DataTransfer, 'effectAllowed' | 'dropEffect' | 'setDat
 // The default child stub: an open directory flow shows its marker; the two
 // Session row lists stay empty (their entries have their own spec). A stub
 // satisfies the generic render signature only with an erased owner type.
-const renderDirectoryFlowOnly: WorkspaceBrowserProps['renderSlot'] = (name: string, owner: object) =>
-  name === 'sidebar.workspaces.directoryFlow' && (owner as DirectoryFlowOwnerProps).open
+// The Workspace row menu renders the shipped Rename/Delete entries wired to
+// the browser's request store, so the dialogs open as they do in production.
+const workspaceRowRequest = createSnapshotStore<WorkspaceRowRequest | null>(null)
+let workspaceRequestSeq = 0
+const requestWorkspaceAction = (request: Omit<WorkspaceRowRequest, 'seq'>): void => {
+  workspaceRowRequest.set({ ...request, seq: ++workspaceRequestSeq })
+}
+function renderWorkspaceMenu(owner: WorkspaceRowOwnerProps, context: MenuOpenState | undefined) {
+  const entryProps = {
+    ...owner,
+    useMenuOpenState: () => context ?? [true, () => {}] as const,
+    requestWorkspaceAction,
+    t,
+  } as unknown as Parameters<typeof RenameWorkspaceMenuItem>[0]
+  return (
+    <>
+      <RenameWorkspaceMenuItem {...entryProps} />
+      <DeleteWorkspaceMenuItem {...entryProps} />
+    </>
+  )
+}
+const renderDirectoryFlowOnly = ((name: string, owner: object, options?: { hookContext?: MenuOpenState }) => {
+  if (name === 'sidebar.workspaces.workspace.menu.item') {
+    return renderWorkspaceMenu(owner as WorkspaceRowOwnerProps, options?.hookContext)
+  }
+  return name === 'sidebar.workspaces.directoryFlow' && (owner as DirectoryFlowOwnerProps).open
     ? <div data-testid="directory-flow" />
     : null
+}) as WorkspaceBrowserProps['renderSlot']
 
 function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
   const controls = createWorkspaceShortcutControls()
   const store = createWorkspaceViewStore().create()
+  workspaceRowRequest.set(null)
   const props: WorkspaceBrowserProps = {
     useShortcuts: select => select([]),
     useWorkspaceShortcuts: bindSnapshotSelector(controls.state),
+    useWorkspaceParents: select => select({}),
+    useWorkspaceRowRequest: bindSnapshotSelector(workspaceRowRequest),
+    settleWorkspaceRowRequest: () => { workspaceRowRequest.set(null) },
     requestSearch: controls.search,
     requestAddWorkspace: controls.add,
     closeAddWorkspace: controls.closeAdd,
@@ -2450,6 +2483,36 @@ describe('WorkspaceBrowser', () => {
   })
 })
 
+
+describe('logical Workspace parents', () => {
+  const main = workspace('main', ['main-session'], 'CreatureModel')
+  const worktree = { ...workspace('wt', ['wt-session'], 'feature/login'), path: '/elsewhere/worktrees/feature-login' }
+  const section = (title: string) => screen.getByText(title).closest<HTMLElement>('[class*="groupSection"]')!
+
+  it('nests a registered child under its parent in the plain Workspace grouping and passes the parent to its menu', () => {
+    const owners: WorkspaceRowOwnerProps[] = []
+    const renderSlot = ((name: string, owner: object, options?: { hookContext?: MenuOpenState }) => {
+      if (name === 'sidebar.workspaces.workspace.menu.item') owners.push(owner as WorkspaceRowOwnerProps)
+      return renderDirectoryFlowOnly(name as never, owner as never, options as never)
+    }) as WorkspaceBrowserProps['renderSlot']
+    const b = mount({
+      useSessions: hook(sessionState([summary('main-session', 1), summary('wt-session', 2)])),
+      useWorkspaces: hook(workspaceState([main, worktree])),
+      useWorkspaceParents: select => select({ wt: wid('main') }),
+      renderSlot,
+    })
+    // The parent auto-expands to reveal its logical child.
+    expect(within(section('CreatureModel')).getByText('feature/login')).toBeTruthy()
+    expect(within(section('feature/login')).queryByText('main-session')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '工作区“feature/login”的操作' }))
+    expect(owners.at(-1)).toMatchObject({ workspaceId: 'wt', parentWorkspaceId: 'main', workspacePath: worktree.path })
+    fireEvent.click(screen.getByRole('button', { name: '工作区“CreatureModel”的操作' }))
+    expect(owners.at(-1)?.parentWorkspaceId).toBeUndefined()
+    // Without a contribution the rows are siblings again.
+    rerender(b, { useWorkspaceParents: select => select({}) })
+    expect(within(section('CreatureModel')).queryByText('feature/login')).toBeNull()
+  })
+})
 
 describe('Workspace tree grouping', () => {
   beforeEach(() => {

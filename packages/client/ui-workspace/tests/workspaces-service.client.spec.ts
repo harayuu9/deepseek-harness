@@ -22,6 +22,7 @@ import type { RowToast } from '../src/client/contract/slots.ts'
 import { DirectoryBrowseError, UiWorkspaceService } from '../src/client/navigation.ts'
 import { en, zh } from '../src/client/locales.ts'
 import { createWorkspaceViewStore, FLAT_SESSION_ORDER_KEY } from '../src/client/stores.ts'
+import { createWorkspaceParentRegistry } from '../src/client/workspace-parents.ts'
 import { UNGROUPED_KEY } from '../src/client/tree.ts'
 
 const sid = (id: string): SessionId => SessionId(id)
@@ -309,6 +310,7 @@ function bench(options: BenchOptions = {}) {
     sessions,
     view.actions,
     notify,
+    createWorkspaceParentRegistry(),
   )
   return { ctx, directoryPicker, sessions, uiWorkspace, workspaces, layout, selectPanel, view, notify, requestDraftInitialization }
 }

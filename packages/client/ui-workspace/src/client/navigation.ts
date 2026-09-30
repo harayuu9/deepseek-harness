@@ -20,7 +20,9 @@ import type {
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { DraftInitializationOptions } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { RowToast } from './contract/slots.ts'
+import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
+import type { RowToast, WorkspaceParentMap } from './contract/slots.ts'
+import type { WorkspaceParentRegistry } from './workspace-parents.ts'
 import { pinOrderAccounts, pinOrderSource } from './pin-order.ts'
 import type { WorkspaceViewStoreActions } from './stores.ts'
 
@@ -130,6 +132,16 @@ export interface UiWorkspace {
    * @returns created absolute path.
    */
   createDirectory(path: string, name: string): Promise<string>
+  /**
+   * Nest Workspace rows under other Workspace rows independently of their
+   * directories: each key of the source's map is a child Workspace id and its
+   * value the parent Workspace id. Applies to both grouped views; a parent
+   * that is not listed, or an edge that would close a cycle, falls back to the
+   * directory-ancestry nesting of the tree view.
+   * @param source - observable child → parent map owned by the caller.
+   * @returns idempotent disposer removing this contribution.
+   */
+  registerWorkspaceParents(source: HostObservable<WorkspaceParentMap>): () => void
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -169,6 +181,7 @@ class UiWorkspaceService extends Service implements UiWorkspace {
    * @param sessions - pure Session Controller.
    * @param view - the browser's viewing-store write set (one instance shared with its registration).
    * @param notify - show one notice through the Workspace notice channel.
+   * @param parents - logical Workspace parent registry the browser reads.
    */
   constructor(
     ctx: Context,
@@ -177,6 +190,7 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     private readonly sessions: ISessions,
     private readonly view: Pick<WorkspaceViewStoreActions, 'pinSessionOrder'>,
     private readonly notify: (toast: RowToast) => void,
+    private readonly parents: WorkspaceParentRegistry,
   ) {
     super(ctx, 'uiWorkspace')
     ctx.effect(() => {
@@ -404,6 +418,11 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     const result = await this.directoryPicker.createDirectory(path, name)
     if (!result.ok) throw new DirectoryBrowseError(result.error)
     return result.value
+  }
+
+  registerWorkspaceParents(source: HostObservable<WorkspaceParentMap>): () => void {
+    // The caller owns the disposer (register it as one of its own effects).
+    return this.parents.register(source)
   }
 
   private watchNavigation(): () => void {

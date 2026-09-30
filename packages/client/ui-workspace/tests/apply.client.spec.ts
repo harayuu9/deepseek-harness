@@ -17,8 +17,9 @@ import type { WorkspaceBrowserInjected, WorkspacePickerInjected } from '@deepsee
 import {
   type ArchiveSessionInjected, type ForkSessionInjected, menuOpenStateFactory, type PinSessionInjected,
   type RenameSessionInjected, type RowToastInjected, type SessionArchiveConfirmInjected, type SessionRenameDialogInjected,
-  type SessionIdInjected, type WorkspaceViewStoreHandle,
+  type SessionIdInjected, type WorkspaceViewStoreHandle, workspaceMenuOpenStateFactory, type WorkspaceRowActionInjected,
 } from '../src/client/contract/slots.ts'
+import { DeleteWorkspaceMenuItem, RenameWorkspaceMenuItem } from '../src/client/session-actions/WorkspaceRowActions.tsx'
 import { WorkspaceBrowser } from '../src/client/rows/WorkspaceBrowser.tsx'
 import { ArchiveSessionMenuItem, ArchiveSessionRowButton, SessionArchiveConfirmDialog } from '../src/client/session-actions/ArchiveSession.tsx'
 import { ForkSessionMenuItem } from '../src/client/session-actions/ForkSession.tsx'
@@ -268,6 +269,33 @@ describe('ui-workspace apply', () => {
     expect(after.slots.entries(MENU_ITEM)).toHaveLength(5)
     expect(after.slots.entries(ROW_ACTION)).toHaveLength(2)
     expect(after.slots.entries('shell.overlay')).toHaveLength(3)
+  })
+
+  it('declares the Workspace row menu, routes its shipped entries to the browser dialogs, and merges logical parents', async () => {
+    const b = await bench()
+    declare(b.slots, 'sidebar.workspaces')
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+    const WS_MENU = 'sidebar.workspaces.workspace.menu.item'
+    expect(b.slots.spec(WS_MENU)).toEqual({
+      kind: 'list', scope: 'root', inject: { hooks: { menuOpenState: workspaceMenuOpenStateFactory } },
+    })
+    expect(b.slots.entries(WS_MENU).map(registration => [registration.options.id, registration.options.order, registration.component]))
+      .toEqual([['rename', 200, RenameWorkspaceMenuItem], ['delete', 900, DeleteWorkspaceMenuItem]])
+    const rowFace = faceOf(b.slots.entries(WS_MENU)[0]!) as WorkspaceRowActionInjected
+    const browserFace = faceOf(b.slots.entries('sidebar.workspaces')[0]!) as WorkspaceBrowserInjected
+    rowFace.requestWorkspaceAction({ kind: 'delete', workspaceId: 'w1' as WorkspaceId, displayTitle: 'One' })
+    expect(browserFace.hooks.workspaceRowRequest.getSnapshot()).toMatchObject({ kind: 'delete', workspaceId: 'w1', seq: 1 })
+    browserFace.settleWorkspaceRowRequest()
+    expect(browserFace.hooks.workspaceRowRequest.getSnapshot()).toBeNull()
+
+    // A plugin contributes logical parents through the uiWorkspace service.
+    const uiWorkspace = b.ctx.get('uiWorkspace') as { registerWorkspaceParents: (source: unknown) => () => void }
+    const source = createSnapshotStore<Record<string, WorkspaceId>>({ child: 'parent' as WorkspaceId })
+    const dispose = uiWorkspace.registerWorkspaceParents(source)
+    expect(browserFace.hooks.workspaceParents.getSnapshot()).toEqual({ child: 'parent' })
+    dispose()
+    expect(browserFace.hooks.workspaceParents.getSnapshot()).toEqual({})
+    b.ctx.fiber.dispose()
   })
 
   it('declares the two Session row lists and registers the shipped actions and overlay surfaces into them', async () => {

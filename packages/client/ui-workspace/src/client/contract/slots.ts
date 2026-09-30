@@ -32,6 +32,13 @@
  * client plugin's action lands beside them by `order` and needs nothing from
  * the browser beyond the row identity.
  *
+ * It also declares the **Workspace row menu list**
+ * (`sidebar.workspaces.workspace.menu.item`): Rename and Delete are ordinary
+ * entries that raise a request the browser-owned dialogs answer, so a plugin
+ * row lands beside them by `order`. Logical Workspace parents that plugins
+ * register through `uiWorkspace.registerWorkspaceParents` nest one Workspace
+ * row under another independently of directory ancestry.
+ *
  * The browser entry additionally declares two `list` seats per Session row
  * (`sidebar.session.row.leading` / `sidebar.session.row.hover`) for ambient
  * row decorations. Both take the row's Session identity and nothing else: a
@@ -102,6 +109,61 @@ export type UseMenuOpenState = () => MenuOpenState
  */
 export const menuOpenStateFactory: SlotHookFactory<'sidebar.workspaces.session.menu.item', UseMenuOpenState> =
   (_standard, state) => () => state
+
+/** Owner share of one Workspace row menu occurrence: the real Workspace the row shows. */
+export interface WorkspaceRowOwnerProps {
+  /** Workspace the row shows. */
+  workspaceId: WorkspaceId
+  /** The Workspace's canonical directory in Host spelling. */
+  workspacePath: string
+  /** Row display title (the localized label for an automatically titled Workspace). */
+  displayTitle: string
+  /** The Workspace a plugin placed this row under, when it is a logical child. */
+  parentWorkspaceId?: WorkspaceId | undefined
+}
+
+/**
+ * Bind the Workspace row's render occurrence into the entries' `useMenuOpenState` hook.
+ * @param _standard - framework standard props (unused).
+ * @param state - the menu's open-state pair from the render occurrence.
+ * @returns the hook the entry calls.
+ */
+export const workspaceMenuOpenStateFactory: SlotHookFactory<'sidebar.workspaces.workspace.menu.item', UseMenuOpenState> =
+  (_standard, state) => () => state
+
+/**
+ * A Workspace row request raised by a shipped menu entry and answered by the
+ * browser-owned dialogs (they outlive the row menu the entry sat in).
+ */
+export interface WorkspaceRowRequest {
+  /** Which dialog to open. */
+  kind: 'rename' | 'delete'
+  /** Target Workspace. */
+  workspaceId: WorkspaceId
+  /** Label on screen, seeding the rename draft and naming the delete target. */
+  displayTitle: string
+  /** Distinguishes repeated requests for the same row. */
+  seq: number
+}
+
+/** Shared share of the shipped Workspace row menu entries. */
+export interface WorkspaceRowActionInjected {
+  /** Ask the browser to open the rename or delete dialog for a Workspace row. */
+  requestWorkspaceAction: (request: Omit<WorkspaceRowRequest, 'seq'>) => void
+}
+
+/** Props of one shipped Workspace-row menu entry: owner share + locale seat + the entry's injected share. */
+export type WorkspaceMenuItemProps<Injected extends object = object> =
+  PropsRuntime<'sidebar.workspaces.workspace.menu.item'>
+  & PropsLocale<'workspace'>
+  & InjectFace<Injected>
+
+/**
+ * One contributor's logical Workspace parents: child Workspace id → parent
+ * Workspace id. The browser nests a child row under its parent in both
+ * grouped views, ahead of the directory-ancestry nesting of the tree view.
+ */
+export type WorkspaceParentMap = Readonly<Record<string, WorkspaceId>>
 
 /**
  * Owner share of the two Session-row schedule seats. Both receive only the
@@ -187,6 +249,24 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * handling to keep the row from opening.
      */
     'sidebar.workspaces.session.row.action': { kind: 'list'; scope: 'root'; owner: SessionRowOwnerProps }
+    /**
+     * The rows of one real Workspace's "..." menu, in ascending `order`.
+     * ui-workspace registers `rename` (200) and `delete` (900) here, so a
+     * plugin row lands between them by its own `order`. The ungrouped bucket
+     * has no menu. Entries follow the Session menu's rules: one
+     * `role="menuitem"` `<button>`, own visibility, and dismissal through the
+     * injected `useMenuOpenState` hook. A surface that must outlive the menu
+     * (a dialog) renders from the contributing package's own `shell.overlay` entry.
+     */
+    'sidebar.workspaces.workspace.menu.item': {
+      kind: 'list'
+      scope: 'root'
+      owner: WorkspaceRowOwnerProps
+      hookContext: MenuOpenState
+      inject: { hooks: {
+        menuOpenState: SlotHookFactory<'sidebar.workspaces.workspace.menu.item', UseMenuOpenState>
+      } }
+    }
   }
 }
 
@@ -228,7 +308,13 @@ export type WorkspaceBrowserInjected = {
     hostInfo: HostObservable<RemoteHostFacts>
     workspaceShortcuts: HostObservable<WorkspaceShortcutState>
     shortcuts: HostObservable<readonly ShortcutCatalogEntry[]>
+    /** Merged logical Workspace parents from every registered contributor. */
+    workspaceParents: HostObservable<WorkspaceParentMap>
+    /** The pending Workspace rename/delete request raised by a menu entry. */
+    workspaceRowRequest: HostObservable<WorkspaceRowRequest | null>
   }
+  /** Consume the pending Workspace row request. */
+  settleWorkspaceRowRequest: () => void
   /** Open the browser search and focus its input. */
   requestSearch: () => void
   /** Request the existing directory picker. */
@@ -471,6 +557,7 @@ export type WorkspaceBrowserProps =
     | 'sidebar.workspaces.directoryFlow'
     | 'sidebar.workspaces.session.menu.item'
     | 'sidebar.workspaces.session.row.action'
+    | 'sidebar.workspaces.workspace.menu.item'
     | 'sidebar.session.row.leading'
     | 'sidebar.session.row.hover'
   >
