@@ -24,7 +24,6 @@ import { en, zh } from '../src/client/locales.ts'
 import { createWorkspaceViewStore, FLAT_SESSION_ORDER_KEY } from '../src/client/stores.ts'
 import { createWorkspaceParentRegistry } from '../src/client/workspace-parents.ts'
 import { UNGROUPED_KEY } from '../src/client/tree.ts'
-import { createWorkspaceParentRegistry } from '../src/client/workspace-parents.ts'
 
 const sid = (id: string): SessionId => SessionId(id)
 const wid = (id: string): WorkspaceId => id as WorkspaceId
